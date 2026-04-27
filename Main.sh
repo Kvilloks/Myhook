@@ -1,7 +1,9 @@
-// === UNIVERSAL NETWORK HOOK ANALYZER ===
+// UNIVERSAL AUTH+NET HOOK ANALYZER
+
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
 #include <winhttp.h>
 #include <wininet.h>
 #include <fstream>
@@ -11,6 +13,7 @@
 #include <ctime>
 #include <vector>
 #include <algorithm>
+#include <string>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -18,14 +21,33 @@
 
 std::mutex g_LogMutex;
 
-// --- Ключевые фильтры (можно редактировать) ---
-std::vector<std::string> g_Keywords = {"paradox", "api", "login", "v3", ".top", "Infinity", "account"};
+// --- Ключевые фильтры ---
+// ДОБАВЛЕНЫ все авторизационные слова!
+std::vector<std::string> g_Keywords = {
+    "paradox", "api", "login", "v3", ".top", "Infinity", "account",
+    "auth", "key", "license", "serial", "trial", "success", "ok", "valid", "invalid", "error", "fail"
+};
 
-// --- Логирование ---
+// Для особо важных сообщений: подсвеченный лог
+void LogHighlight(const std::string& text) {
+    std::lock_guard<std::mutex> lock(g_LogMutex);
+    std::ofstream f("C:\\temp\\hook_auth_highlight.log", std::ios::app | std::ios::binary);
+    if(!f) return;
+    std::time_t now = std::time(nullptr);
+    char timebuf[32];
+    struct tm tm_now;
+    localtime_s(&tm_now, &now);
+    std::strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_now);
+    DWORD pid = GetCurrentProcessId();
+    DWORD tid = GetCurrentThreadId();
+    f << "[!!] [" << timebuf << "] [PID:" << pid << "/TID:" << tid << "] " << text << std::endl;
+}
+
+// --- Обычный лог ---
 void LogWithTime(const std::string& text)
 {
     std::lock_guard<std::mutex> lock(g_LogMutex);
-    std::ofstream f("C:\\temp\\unihook.log", std::ios::app | std::ios::binary);
+    std::ofstream f("C:\\temp\\hook_net.log", std::ios::app | std::ios::binary);
     if(!f) return;
     std::time_t now = std::time(nullptr);
     char timebuf[32];
@@ -62,22 +84,25 @@ bool LooksLikeJson(const char* data, int len)
     return false;
 }
 
-bool PassesFilter(const char* data, int len)
+bool PassesFilter(const char* data, int len, std::string* found = nullptr)
 {
-    if (g_Keywords.empty())
-        return true;
+    if (g_Keywords.empty()) return true;
     std::string buf(data, data + ((len > 4096) ? 4096 : len));
     std::transform(buf.begin(), buf.end(), buf.begin(), ::tolower);
     for (auto& kw : g_Keywords)
-        if (buf.find(kw) != std::string::npos)
+        if (buf.find(kw) != std::string::npos) {
+            if(found) *found = kw;
             return true;
+        }
     return false;
 }
 
+// Единая точка логирования любых API (+ подсветка ответов с ключами)
 void LogApiCall(const char* api, const void* buf, int size, const char* note = nullptr)
 {
     if (!buf || size <= 0) return;
-    if (!PassesFilter((const char*)buf, size)) return;
+    std::string highlight_kw;
+    bool hits = PassesFilter((const char*)buf, size, &highlight_kw);
     std::ostringstream oss;
     oss << "[API] " << api;
     if (note) oss << " [" << note << "]";
@@ -87,9 +112,13 @@ void LogApiCall(const char* api, const void* buf, int size, const char* note = n
     else
         oss << HexDump((const char*)buf, size);
     LogWithTime(oss.str());
+    if (hits) {
+        oss << "\n[!!! KEYWORD \"" << highlight_kw << "\" found in answer]";
+        LogHighlight(oss.str());
+    }
 }
 
-// --- Хуки для WinHTTP ---
+// --- HUКИ ДЛЯ WINHTTP ---
 typedef BOOL (WINAPI* WinHttpReadData_t)(HINTERNET, LPVOID, DWORD, LPDWORD);
 WinHttpReadData_t TrueWinHttpReadData = nullptr;
 BOOL WINAPI MyWinHttpReadData(HINTERNET h, LPVOID buf, DWORD buflen, LPDWORD bytesRead)
@@ -100,7 +129,7 @@ BOOL WINAPI MyWinHttpReadData(HINTERNET h, LPVOID buf, DWORD buflen, LPDWORD byt
     return res;
 }
 
-// --- Хуки для WinINet ---
+// --- HUКИ ДЛЯ WININET ---
 typedef BOOL (WINAPI* InternetReadFile_t)(HINTERNET, LPVOID, DWORD, LPDWORD);
 InternetReadFile_t TrueInternetReadFile = nullptr;
 BOOL WINAPI MyInternetReadFile(HINTERNET h, LPVOID buf, DWORD buflen, LPDWORD bytesRead)
@@ -111,7 +140,7 @@ BOOL WINAPI MyInternetReadFile(HINTERNET h, LPVOID buf, DWORD buflen, LPDWORD by
     return res;
 }
 
-// --- Сокет, RAW TCP ---
+// --- RAW SOCKET ---
 typedef int (WSAAPI* Send_t)(SOCKET, const char*, int, int);
 Send_t TrueSend = nullptr;
 int WSAAPI MySend(SOCKET s, const char* buf, int len, int flags)
@@ -131,8 +160,33 @@ int WSAAPI MyRecv(SOCKET s, char* buf, int len, int flags)
     return ret;
 }
 
-// Пример установки хуков через MinHook — оставь реально инициализацию!
-#include "MinHook.h" // включи MinHook
+// --- Асинхронные сокеты (WSARecv/WSASend) ---
+typedef int (WSAAPI *WSARecv_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+WSARecv_t TrueWSARecv = nullptr;
+int WSAAPI MyWSARecv(SOCKET s, LPWSABUF buf, DWORD bufs, LPDWORD recvd, LPDWORD flags, LPWSAOVERLAPPED o, LPWSAOVERLAPPED_COMPLETION_ROUTINE c)
+{
+    int ret = TrueWSARecv ? TrueWSARecv(s, buf, bufs, recvd, flags, o, c) : SOCKET_ERROR;
+    if(ret == 0 && buf && bufs)
+        for(DWORD i=0; i<bufs; ++i)
+            if(buf[i].buf && buf[i].len)
+                LogApiCall("WSARecv", buf[i].buf, buf[i].len, "SOCKET IN [WSARecv]");
+    return ret;
+}
+
+typedef int (WSAAPI *WSASend_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+WSASend_t TrueWSASend = nullptr;
+int WSAAPI MyWSASend(SOCKET s, LPWSABUF buf, DWORD bufs, LPDWORD sent, DWORD flags, LPWSAOVERLAPPED o, LPWSAOVERLAPPED_COMPLETION_ROUTINE c)
+{
+    int ret = TrueWSASend ? TrueWSASend(s, buf, bufs, sent, flags, o, c) : SOCKET_ERROR;
+    if(ret == 0 && buf && bufs)
+        for(DWORD i=0; i<bufs; ++i)
+            if(buf[i].buf && buf[i].len)
+                LogApiCall("WSASend", buf[i].buf, buf[i].len, "SOCKET OUT [WSASend]");
+    return ret;
+}
+
+// --- Пример установки хуков (MinHook, аналогично прошлыми примерами) ---
+#include "MinHook.h"
 
 void SetupHooks()
 {
@@ -160,20 +214,22 @@ void SetupHooks()
     if (hWS2) {
         void* p1 = GetProcAddress(hWS2, "send");
         void* p2 = GetProcAddress(hWS2, "recv");
+        void* p3 = GetProcAddress(hWS2, "WSARecv");
+        void* p4 = GetProcAddress(hWS2, "WSASend");
         if (p1) MH_CreateHook(p1, MySend, (void**)&TrueSend);
         if (p2) MH_CreateHook(p2, MyRecv, (void**)&TrueRecv);
+        if (p3) MH_CreateHook(p3, MyWSARecv, (void**)&TrueWSARecv);
+        if (p4) MH_CreateHook(p4, MyWSASend, (void**)&TrueWSASend);
     }
 
     MH_EnableHook(MH_ALL_HOOKS);
 }
 
-// --- Удалить хуки ---
 void RemoveHooks() {
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 }
 
-// --- DllMain: запуск и снятие хуков ---
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if(reason == DLL_PROCESS_ATTACH) {
