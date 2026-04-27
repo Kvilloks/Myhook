@@ -1,5 +1,5 @@
 // UNIVERSAL AUTH+NET HOOK ANALYZER
-
+#include "pch.h"
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
