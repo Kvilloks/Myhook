@@ -29,7 +29,9 @@ void LogWithTime(const std::string& text)
     if(!f) return;
     std::time_t now = std::time(nullptr);
     char timebuf[32];
-    std::strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    struct tm tm_now;
+    localtime_s(&tm_now, &now);
+    std::strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_now);
     DWORD pid = GetCurrentProcessId();
     DWORD tid = GetCurrentThreadId();
     f << "[" << timebuf << "] [PID:" << pid << "/TID:" << tid << "] " << text << std::endl;
