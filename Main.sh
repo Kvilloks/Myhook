@@ -2,6 +2,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <wininet.h>   
+#include <winhttp.h>   
 #include "MinHook.h"
 #include <fstream>
 #include <sstream>
